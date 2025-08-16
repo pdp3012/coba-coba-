@@ -1,0 +1,18 @@
+[Unit]
+Description=Stock Alert Telegram Bot
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/workspace
+Environment=PATH=/workspace/venv/bin
+ExecStart=/workspace/venv/bin/python /workspace/run_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
