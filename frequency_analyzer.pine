@@ -1,0 +1,273 @@
+//@version=5
+indicator("Frequency Analyzer", shorttitle="FreqAnalyzer", overlay=false, max_bars_back=500)
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+// Timeframe settings
+timeframe_input = input.string("D", "Timeframe", options=["1", "5", "15", "30", "60", "D", "W", "M"])
+use_custom_timeframe = input.bool(false, "Use Custom Timeframe")
+custom_timeframe = input.int(20, "Custom Period Length", minval=5, maxval=100)
+
+// FFT Analysis settings
+fft_length = input.int(64, "FFT Length", minval=16, maxval=256, tooltip="Length for Fast Fourier Transform analysis")
+dominant_cycles = input.int(5, "Number of Dominant Cycles", minval=1, maxval=10)
+cycle_threshold = input.float(0.1, "Cycle Strength Threshold", minval=0.01, maxval=1.0, step=0.01)
+
+// Signal settings
+signal_sensitivity = input.float(0.7, "Signal Sensitivity", minval=0.1, maxval=1.0, step=0.1)
+enable_alerts = input.bool(true, "Enable Alerts")
+show_cycles = input.bool(true, "Show Cycle Lines")
+
+// Visual settings
+bull_color = input.color(color.green, "Bullish Signal Color")
+bear_color = input.color(color.red, "Bearish Signal Color")
+neutral_color = input.color(color.gray, "Neutral Signal Color")
+cycle_color = input.color(color.blue, "Cycle Line Color")
+
+// ============================================================================
+// VARIABLES AND CALCULATIONS
+// ============================================================================
+var float[] price_buffer = array.new_float(0)
+var float[] fft_real = array.new_float(0)
+var float[] fft_imag = array.new_float(0)
+var float[] power_spectrum = array.new_float(0)
+var float[] dominant_frequencies = array.new_float(0)
+var float[] dominant_periods = array.new_float(0)
+
+// Get price data based on timeframe
+get_price_data() =>
+    float price = 0.0
+    if timeframe_input == "1" or timeframe_input == "5" or timeframe_input == "15" or timeframe_input == "30" or timeframe_input == "60"
+        price := close
+    else if timeframe_input == "D"
+        price := request.security(syminfo.tickerid, "D", close)
+    else if timeframe_input == "W"
+        price := request.security(syminfo.tickerid, "W", close)
+    else if timeframe_input == "M"
+        price := request.security(syminfo.tickerid, "M", close)
+    else
+        price := close
+    
+    if use_custom_timeframe
+        price := ta.sma(close, custom_timeframe)
+    
+    price
+
+current_price = get_price_data()
+
+// Update price buffer
+if barstate.islast
+    array.clear(price_buffer)
+    for i = 0 to fft_length - 1
+        if barstate.islast[i]
+            array.push(price_buffer, get_price_data())
+        else
+            array.push(price_buffer, 0.0)
+
+// FFT Analysis function
+fft_analysis() =>
+    if array.size(price_buffer) < fft_length
+        return
+    
+    // Clear previous results
+    array.clear(fft_real)
+    array.clear(fft_imag)
+    array.clear(power_spectrum)
+    array.clear(dominant_frequencies)
+    array.clear(dominant_periods)
+    
+    // Initialize FFT arrays
+    for i = 0 to fft_length - 1
+        array.push(fft_real, array.get(price_buffer, i))
+        array.push(fft_imag, 0.0)
+    
+    // Simple FFT implementation (Cooley-Tukey algorithm)
+    fft_cooley_tukey(fft_real, fft_imag, fft_length)
+    
+    // Calculate power spectrum
+    for i = 0 to fft_length - 1
+        real_val = array.get(fft_real, i)
+        imag_val = array.get(fft_imag, i)
+        power = math.sqrt(real_val * real_val + imag_val * imag_val)
+        array.push(power_spectrum, power)
+    
+    // Find dominant frequencies
+    find_dominant_cycles()
+
+// FFT Cooley-Tukey implementation
+fft_cooley_tukey(real_array, imag_array, n) =>
+    if n <= 1
+        return
+    
+    // Split arrays
+    even_real = array.new_float(0)
+    even_imag = array.new_float(0)
+    odd_real = array.new_float(0)
+    odd_imag = array.new_float(0)
+    
+    for i = 0 to n - 1
+        if i % 2 == 0
+            array.push(even_real, array.get(real_array, i))
+            array.push(even_imag, array.get(imag_array, i))
+        else
+            array.push(odd_real, array.get(real_array, i))
+            array.push(odd_imag, array.get(imag_array, i))
+    
+    // Recursive calls
+    fft_cooley_tukey(even_real, even_imag, n / 2)
+    fft_cooley_tukey(odd_real, odd_imag, n / 2)
+    
+    // Combine results
+    for k = 0 to n / 2 - 1
+        angle = -2.0 * math.pi * k / n
+        cos_val = math.cos(angle)
+        sin_val = math.sin(angle)
+        
+        even_real_k = array.get(even_real, k)
+        even_imag_k = array.get(even_imag, k)
+        odd_real_k = array.get(odd_real, k)
+        odd_imag_k = array.get(odd_imag, k)
+        
+        temp_real = cos_val * odd_real_k - sin_val * odd_imag_k
+        temp_imag = sin_val * odd_real_k + cos_val * odd_imag_k
+        
+        array.set(real_array, k, even_real_k + temp_real)
+        array.set(imag_array, k, even_imag_k + temp_imag)
+        array.set(real_array, k + n / 2, even_real_k - temp_real)
+        array.set(imag_array, k + n / 2, even_imag_k - temp_imag)
+
+// Find dominant cycles based on power spectrum
+find_dominant_cycles() =>
+    if array.size(power_spectrum) < 2
+        return
+    
+    // Sort frequencies by power (excluding DC component)
+    var float[] sorted_powers = array.copy(power_spectrum)
+    array.remove(sorted_powers, 0) // Remove DC component
+    
+    // Simple sorting (bubble sort for small arrays)
+    for i = 0 to array.size(sorted_powers) - 1
+        for j = 0 to array.size(sorted_powers) - i - 2
+            if array.get(sorted_powers, j) < array.get(sorted_powers, j + 1)
+                temp = array.get(sorted_powers, j)
+                array.set(sorted_powers, j, array.get(sorted_powers, j + 1))
+                array.set(sorted_powers, j + 1, temp)
+    
+    // Find dominant cycles above threshold
+    threshold = array.get(sorted_powers, 0) * cycle_threshold
+    count = 0
+    
+    for i = 0 to array.size(sorted_powers) - 1
+        if count >= dominant_cycles
+            break
+        
+        if array.get(sorted_powers, i) >= threshold
+            frequency = (i + 1) / fft_length
+            period = 1.0 / frequency
+            
+            if period > 1 and period < fft_length
+                array.push(dominant_frequencies, frequency)
+                array.push(dominant_periods, period)
+                count += 1
+
+// Calculate signal strength based on frequency analysis
+calculate_signal_strength() =>
+    if array.size(dominant_periods) == 0
+        return 0.0
+    
+    // Calculate weighted average of dominant periods
+    total_weight = 0.0
+    weighted_sum = 0.0
+    
+    for i = 0 to array.size(dominant_periods) - 1
+        period = array.get(dominant_periods, i)
+        weight = array.get(power_spectrum, math.round(period))
+        weighted_sum += period * weight
+        total_weight += weight
+    
+    if total_weight == 0
+        return 0.0
+    
+    avg_period = weighted_sum / total_weight
+    
+    // Calculate signal based on current price position relative to cycles
+    cycle_position = bar_index % math.round(avg_period)
+    cycle_progress = cycle_position / math.round(avg_period)
+    
+    // Generate signal based on cycle position
+    if cycle_progress < 0.25 or cycle_progress > 0.75
+        signal = 1.0 * signal_sensitivity // Bullish
+    else if cycle_progress > 0.4 and cycle_progress < 0.6
+        signal = -1.0 * signal_sensitivity // Bearish
+    else
+        signal = 0.0 // Neutral
+    
+    signal
+
+// ============================================================================
+// MAIN EXECUTION
+// ============================================================================
+if barstate.islast
+    fft_analysis()
+
+signal_strength = calculate_signal_strength()
+
+// ============================================================================
+// PLOTTING
+// ============================================================================
+// Main signal plot
+plot(signal_strength, "Signal Strength", color=signal_strength > 0 ? bull_color : signal_strength < 0 ? bear_color : neutral_color, linewidth=2)
+
+// Zero line
+hline(0, "Zero Line", color=color.gray, linestyle=hline.style_dashed)
+
+// Signal levels
+hline(signal_sensitivity, "Bullish Threshold", color=bull_color, linestyle=hline.style_dotted)
+hline(-signal_sensitivity, "Bearish Threshold", color=bear_color, linestyle=hline.style_dotted)
+
+// Cycle information display
+if show_cycles and array.size(dominant_periods) > 0
+    for i = 0 to math.min(array.size(dominant_periods) - 1, 2)
+        period = array.get(dominant_periods, i)
+        if period > 1
+            cycle_line = math.sin(2 * math.pi * bar_index / period) * signal_sensitivity * 0.5
+            plot(cycle_line, "Cycle " + str.tostring(i + 1), color=cycle_color, linewidth=1, display=display.none)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+if enable_alerts
+    // Bullish signal alert
+    if signal_strength > signal_sensitivity and signal_strength[1] <= signal_sensitivity
+        alert("Frequency Analyzer: Bullish Signal Detected! Signal Strength: " + str.tostring(signal_strength), alert.freq_once_per_bar)
+    
+    // Bearish signal alert
+    if signal_strength < -signal_sensitivity and signal_strength[1] >= -signal_sensitivity
+        alert("Frequency Analyzer: Bearish Signal Detected! Signal Strength: " + str.tostring(signal_strength), alert.freq_once_per_bar)
+
+// ============================================================================
+// TABLE DISPLAY
+// ============================================================================
+if barstate.islast
+    var table info_table = table.new(position.top_right, 2, 6, bgcolor=color.white, border_width=1)
+    
+    table.cell(info_table, 0, 0, "Frequency Analyzer", text_color=color.black, bgcolor=color.blue)
+    table.cell(info_table, 1, 0, "Status", text_color=color.black, bgcolor=color.blue)
+    
+    table.cell(info_table, 0, 1, "Signal Strength", text_color=color.black)
+    table.cell(info_table, 1, 1, str.tostring(signal_strength, "#.##"), 
+               text_color=signal_strength > 0 ? color.green : signal_strength < 0 ? color.red : color.gray)
+    
+    table.cell(info_table, 0, 2, "Dominant Cycles", text_color=color.black)
+    table.cell(info_table, 1, 2, str.tostring(array.size(dominant_periods)), text_color=color.black)
+    
+    if array.size(dominant_periods) > 0
+        table.cell(info_table, 0, 3, "Primary Cycle", text_color=color.black)
+        table.cell(info_table, 1, 3, str.tostring(array.get(dominant_periods, 0), "#.#") + " bars", text_color=color.black)
+    
+    table.cell(info_table, 0, 4, "Timeframe", text_color=color.black)
+    table.cell(info_table, 1, 4, timeframe_input, text_color=color.black)
+    
+    table.cell(info_table, 0, 5, "FFT Length", text_color=color.black)
+    table.cell(info_table, 1, 5, str.tostring(fft_length), text_color=color.black)
